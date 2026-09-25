@@ -2,7 +2,7 @@
 	"name": "elabx/inputfield-file-video-poster",
 	"description": "ProcessWire module that automatically generates poster images for uploaded videos",
 	"minimum-stability": "dev",
-	"type": "processwire-module",
+	"type": "pw-module",
 	"authors": [
 		{
 			"name": "Eduardo San Miguel Garcia",

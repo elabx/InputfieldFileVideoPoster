@@ -3,7 +3,7 @@ namespace ProcessWire;
 
 $info = array(
 	'title' => 'Inputfield File Video Poster',
-	'version' => 100,
+	'version' => 101,
 	'summary' => 'Automatically generates poster images for uploaded videos in the admin.',
 	'singular' => true,
 	'autoload' => true,

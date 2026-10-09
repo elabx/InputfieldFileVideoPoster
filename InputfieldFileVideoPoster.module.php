@@ -46,13 +46,16 @@ class InputfieldFileVideoPoster extends WireData implements Module, Configurable
 	/**
 	 * Helper to generate the toolbar HTML
 	 */
-	public function renderToolbar($videoUrl, $coverUrl, $basename)
+	public function renderToolbar($videoUrl, $coverUrl, $basename, $pageId = 0, $autoGenerate = false)
 	{
+		$pageId = (int) $pageId;
+		$basename = $this->wire('sanitizer')->entities($basename);
+		$auto = $autoGenerate ? " data-auto='1'" : '';
 		$toolbar = "";
 		if (!$coverUrl) {
 			// Not created yet
 			$toolbar = "<div class='video-poster-actions' style='margin-top: 5px; font-size: 0.85em;'>
-				<a href='#' class='video-poster-generate' data-url='$videoUrl' style='color: #e83e8c;'>
+				<a href='#' class='video-poster-generate' data-url='$videoUrl' data-page-id='$pageId' data-filename='$basename'$auto style='color: #e83e8c;'>
 					<i class='fa fa-magic'></i> Generate Thumbnail
 				</a>
 			</div>";
@@ -69,7 +72,7 @@ class InputfieldFileVideoPoster extends WireData implements Module, Configurable
 						<i class='fa fa-eye'></i> Preview
 					</a>
 				</span>
-				<a href='#' class='video-poster-generate' data-url='$videoUrl' title='Regenerate' style='color: #6c757d;'>
+				<a href='#' class='video-poster-generate' data-url='$videoUrl' data-page-id='$pageId' data-filename='$basename' title='Regenerate' style='color: #6c757d;'>
 					<i class='fa fa-refresh'></i> Regenerate
 				</a>
 			</div>";
@@ -93,7 +96,9 @@ class InputfieldFileVideoPoster extends WireData implements Module, Configurable
 		$coverUrl = $pagefile->videoCoverUrl();
 
 		$out = $event->return;
-		$out .= $this->renderToolbar($pagefile->url, $coverUrl, $pagefile->basename);
+		// Rendered in response to an admin upload: generate the poster right away
+		$isUpload = $this->wire('input')->get('InputfieldFileAjax') && isset($_SERVER['HTTP_X_FILENAME']);
+		$out .= $this->renderToolbar($pagefile->url, $coverUrl, $pagefile->basename, $pagefile->page->id, $isUpload);
 
 		$event->return = $out;
 	}
@@ -118,6 +123,10 @@ class InputfieldFileVideoPoster extends WireData implements Module, Configurable
 		$p = $this->wire('pages')->get($pageId);
 		if (!$p->id || !$p->editable()) {
 			return ['success' => false, 'message' => 'Permission denied'];
+		}
+
+		if (!$this->isVideoFilename($filename) || !in_array($filename, $this->videoBasenames($p))) {
+			return ['success' => false, 'message' => 'Video not found on page'];
 		}
 
 		// Decode image
@@ -148,13 +157,9 @@ class InputfieldFileVideoPoster extends WireData implements Module, Configurable
 		if (file_put_contents($fullPath, $decoded)) {
 			$url = $this->wire('config')->urls->root . ltrim($this->storagePath, '/') . $pageId . '/' . $posterName;
 
-			// We need to return the new markup for the toolbar
-			// We assume the video URL is standard based on page ID and filename, or we'd need to reconstruct it properly.
-			// Since we don't have the full Pagefile object easily without querying fields, we'll assume standard PW file URL structure:
-			// /site/assets/files/PAGEID/FILENAME
-			$videoUrl = $this->wire('config')->urls->files . $pageId . '/' . $filename;
+			$videoUrl = $p->filesManager()->url() . $filename;
 
-			$markup = $this->renderToolbar($videoUrl, $url, $filename);
+			$markup = $this->renderToolbar($videoUrl, $url, $filename, $pageId);
 
 			return [
 				'success' => true,
@@ -199,6 +204,95 @@ class InputfieldFileVideoPoster extends WireData implements Module, Configurable
 		} else {
 			$event->return = '';
 		}
+	}
+
+	protected function isVideoFilename($filename)
+	{
+		return in_array(strtolower(pathinfo($filename, PATHINFO_EXTENSION)), ['mp4', 'webm', 'ogg', 'mov']);
+	}
+
+	/**
+	 * Video basenames in $page's file fields, including uploads not saved yet
+	 */
+	protected function videoBasenames(Page $page)
+	{
+		$basenames = [];
+		foreach ($page->fieldgroup as $field) {
+			if (!$field->type instanceof FieldtypeFile) continue;
+			$files = $page->getUnformatted($field->name);
+			if (!$files instanceof Pagefiles) continue;
+			foreach ($files as $file) {
+				if ($this->isVideoFilename($file->basename)) $basenames[] = $file->basename;
+			}
+		}
+		return $basenames;
+	}
+
+	public function ___upgrade($fromVersion, $toVersion)
+	{
+		$this->relocateStrayPosters();
+	}
+
+	/**
+	 * Before 1.0.1, posters generated on upload were saved under the edited page
+	 * instead of the repeater item (or under the browser's filename instead of the
+	 * stored one). Move each to where videoCoverUrl() looks when exactly one video matches.
+	 */
+	protected function relocateStrayPosters()
+	{
+		$basePath = $this->wire('config')->paths->root . ltrim($this->storagePath, '/');
+		if (!is_dir($basePath)) return;
+
+		$moved = 0;
+		foreach (scandir($basePath) as $dir) {
+			if (!ctype_digit($dir)) continue;
+			$owner = $this->wire('pages')->get((int) $dir);
+			if (!$owner->id) continue;
+
+			$videos = $this->findVideoFiles($owner);
+			foreach (scandir($basePath . $dir) as $poster) {
+				$ext = strtolower(pathinfo($poster, PATHINFO_EXTENSION));
+				if (!in_array($ext, ['webp', 'jpg'])) continue;
+				$name = pathinfo($poster, PATHINFO_FILENAME);
+				if (isset($videos[$dir][$name])) continue;
+
+				$matches = [];
+				foreach ($videos as $pageId => $names) {
+					foreach ($names as $videoName) {
+						if (strtolower($videoName) === strtolower($name)) $matches[] = [$pageId, $videoName];
+					}
+				}
+				if (count($matches) !== 1) continue;
+
+				list($pageId, $videoName) = $matches[0];
+				$targetDir = $basePath . $pageId . '/';
+				if (is_file($targetDir . "$videoName.webp") || is_file($targetDir . "$videoName.jpg")) continue;
+				if (!is_dir($targetDir) && !wireMkdir($targetDir, true)) continue;
+				if (rename($basePath . $dir . '/' . $poster, $targetDir . "$videoName.$ext")) $moved++;
+			}
+		}
+
+		if ($moved) $this->message("InputfieldFileVideoPoster: moved $moved poster(s) to their video's page");
+	}
+
+	/**
+	 * Video filenames (without extension) on $page and its repeater items, keyed by page ID
+	 */
+	protected function findVideoFiles(Page $page, $depth = 0)
+	{
+		$videos = [];
+		foreach ($this->videoBasenames($page) as $basename) {
+			$name = pathinfo($basename, PATHINFO_FILENAME);
+			$videos[$page->id][$name] = $name;
+		}
+		if ($depth > 3) return $videos;
+
+		foreach ($this->wire('pages')->find("name=for-page-{$page->id}, include=all") as $parent) {
+			foreach ($parent->children('include=all') as $item) {
+				$videos = $videos + $this->findVideoFiles($item, $depth + 1);
+			}
+		}
+		return $videos;
 	}
 
 	public function install()

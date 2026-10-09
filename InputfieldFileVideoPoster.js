@@ -40,10 +40,15 @@ document.addEventListener('DOMContentLoaded', function () {
                 canvas.width = video.videoWidth;
                 canvas.height = video.videoHeight;
 
-                const ctx = canvas.getContext('2d');
-                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-                const dataUrl = canvas.toDataURL('image/webp', 0.8);
+                let dataUrl;
+                try {
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                    dataUrl = canvas.toDataURL('image/webp', 0.8);
+                } catch (err) {
+                    reject(err);
+                    return;
+                }
 
                 // Cleanup with a slight delay to prevent ERR_FILE_NOT_FOUND
                 if (isBlob) {
@@ -124,28 +129,6 @@ document.addEventListener('DOMContentLoaded', function () {
             });
     };
 
-    const handleFileSelect = (e) => {
-        const input = e.target;
-        if (input.type === 'file') {
-            const files = input.files;
-            if (!files || files.length === 0) return;
-
-            Array.from(files).forEach(file => {
-                if (file.type.startsWith('video/')) {
-                    console.log('VideoPoster: Video selected', file.name);
-                    generateThumbnail(file)
-                        .then(dataUrl => {
-                            console.log('VideoPoster: Thumbnail generated');
-                            uploadThumbnail(file.name, dataUrl);
-                        })
-                        .catch(err => {
-                            console.error('VideoPoster: Failed to generate thumbnail', err);
-                        });
-                }
-            });
-        }
-    };
-
     // Handler for manual generation via link
     const handleGenerateClick = (e) => {
         e.preventDefault();
@@ -153,14 +136,10 @@ document.addEventListener('DOMContentLoaded', function () {
         const url = link.dataset.url;
         const container = link.closest('.video-poster-actions');
 
-        // We need filename and pageID
-        // The URL is usually something like /site/assets/files/123/video.mp4
-        // So pageID is 123, filename is video.mp4
-
-        // Extract filename from URL
+        // Fall back to /site/assets/files/PAGEID/FILENAME for toolbars rendered before 1.0.1
         const parts = url.split('/');
-        const filename = parts.pop();
-        const pageId = parts.pop(); // This might be reliable for standard PW file structure
+        const filename = link.dataset.filename || parts.pop();
+        const pageId = link.dataset.pageId || parts.pop();
 
         // Add spinner or loading state
         const icon = link.querySelector('i');
@@ -184,21 +163,18 @@ document.addEventListener('DOMContentLoaded', function () {
         // Handle jQuery objects
         if (root instanceof jQuery) root = root[0];
 
-        // Attach to file inputs
-        const inputs = root.querySelectorAll('input[type="file"]');
-        inputs.forEach(input => {
-            if (input.dataset.videoPosterInit) return;
-            input.dataset.videoPosterInit = 'true';
-            input.addEventListener('change', handleFileSelect);
-        });
-
         // Attach to generate links
         const links = root.querySelectorAll('.video-poster-generate');
         links.forEach(link => {
-            // Remove old listener if any (simplistic way) or check attribute
-            if (link.dataset.videoPosterInit) return;
-            link.dataset.videoPosterInit = 'true';
-            link.addEventListener('click', handleGenerateClick);
+            if (!link.dataset.videoPosterInit) {
+                link.dataset.videoPosterInit = 'true';
+                link.addEventListener('click', handleGenerateClick);
+            }
+            // Items rendered by an upload come back with data-auto
+            if (link.dataset.auto && !link.dataset.videoPosterAuto) {
+                link.dataset.videoPosterAuto = 'true';
+                link.click();
+            }
         });
     };
 
@@ -209,6 +185,11 @@ document.addEventListener('DOMContentLoaded', function () {
     if (typeof jQuery !== 'undefined') {
         jQuery(document).on('reloaded', '.InputfieldRepeaterItem', function (event) {
             initVideoPoster(event.currentTarget);
+        });
+
+        // Items added by an upload render with the real page id and stored filename
+        jQuery(document).on('AjaxUploadDone', function (event) {
+            initVideoPoster(event.target);
         });
     }
 });
